@@ -69,21 +69,24 @@ fn tryReadRegion(region: RegionInfo) ?usize {
     return null;
 }
 
-const PatternByte = packed struct {
-    byte: u8,
-    wildcard: u8,
-};
+inline fn bitand_array(a: []u8, b: []const u8) void {
+    std.debug.assert(a.len == b.len);
+    for (0..a.len) |i| {
+        a[i] &= b[i];
+    }
+}
 
 pub fn main(init: std.process.Init) !void {
     _ = init;
 
-    const memory = [_]u98{
-        0x01, 0x02,
-    };
-    const pattern = [_]PatternByte{
-        .{ .byte = 0x01, .wildcard = 0xff },
-        .{ .byte = 0x02, .wildcard = 0xff },
-    };
+    var memory = [_]u8{ 0x01, 0x02, 0x03, 0x04, 0x05 };
+    var pattern = [_]u8{ 0x01, 0x02, 0x03, 0x00, 0x05 };
+    const wildcards = [_]u8{ 0xff, 0xff, 0xff, 0x00, 0xff };
+    bitand_array(&pattern, &wildcards);
+    bitand_array(&memory, &wildcards);
+    std.log.debug("{any}", .{memory});
+    std.log.debug("{any}", .{pattern});
+    std.log.debug("{any}", .{pattern});
 
     //    var regions = try getRegionsInfo(init.io, init.gpa);
 
