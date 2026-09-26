@@ -41,13 +41,14 @@ fn getRegionsInfo(io: std.Io, gpa: std.mem.Allocator) !std.ArrayList(RegionInfo)
         const dev = (try reader.interface.takeDelimiter(' ')) orelse break;
         const inode = (try reader.interface.takeDelimiter(' ')) orelse break;
         const pathname = (try reader.interface.takeDelimiter('\n')) orelse break;
-        std.log.debug("{s} {s} {s} {s} {s} {s} {s}", .{ start_str, end_str, prot, offset, dev, inode, pathname });
+        _ = .{ offset, dev, inode };
+        // std.log.debug("{s} {s} {s} {s} {s} {s} {s}", .{ start_str, end_str, prot, offset, dev, inode, pathname });
 
         if (std.mem.count(u8, pathname, "vvar_vclock") == 0 and prot[0] == 'r') {
             // don't accept non-readable regions
             try regions.append(gpa, region);
         } else {
-            std.log.debug("- skipped", .{});
+            // std.log.debug("- skipped", .{});
         }
 
         // skip everything else
@@ -57,50 +58,76 @@ fn getRegionsInfo(io: std.Io, gpa: std.mem.Allocator) !std.ArrayList(RegionInfo)
     return regions;
 }
 
-fn tryReadRegion(region: RegionInfo) ?usize {
-    // const start_ptr: *u8 = @ptrFromInt(region.start);
-    // const end_ptr: *u8 = @ptrFromInt(region.end);
-    for (region.start..region.end) |i| {
-        if (region.readSafe(@ptrFromInt(i)) == 0x69 and region.readSafe(@ptrFromInt(i + 1)) == 0x42) {
-            std.log.warn("found 0x6942 at {x}", .{i});
-            return i;
+inline fn loadPadded(vector_length: comptime_int, slice: []const u8) @Vector(vector_length, u8) {
+    var v: @Vector(vector_length, u8) = @splat(0);
+    @memcpy(@as(*[vector_length]u8, @ptrCast(&v))[0..slice.len], slice);
+    return v;
+}
+
+const FindPatternError = error{ PatternTooLongForVector, PatternAndWildcardSizeDiffers };
+fn findPattern(vector_length: comptime_int, memory: []const u8, pattern: []const u8, wildcards: []const u8) FindPatternError!?usize {
+    if (pattern.len != wildcards.len) {
+        return FindPatternError.PatternAndWildcardSizeDiffers;
+    }
+    if (pattern.len > vector_length) {
+        return FindPatternError.PatternTooLongForVector;
+    }
+
+    // Load the pattern into a Vector
+    const wildcards_vector = loadPadded(vector_length, wildcards);
+    const pattern_vector = loadPadded(vector_length, pattern) & wildcards_vector;
+
+    for (0..memory.len) |i| {
+        const start = i;
+        var end = i + vector_length;
+        if (end >= memory.len) end = memory.len;
+
+        // Load the memory slice into a Vector
+        const memory_vector = loadPadded(vector_length, memory[start..end]) & wildcards_vector;
+
+        if (@reduce(.And, memory_vector == pattern_vector)) {
+            // std.log.info("pattern: {}", .{pattern_vector});
+            // std.log.info("wildcards: {}", .{wildcards_vector});
+            // std.log.info("memory: {} {any}", .{ memory_vector, memory[start..end] });
+            // std.log.info("found: {}", .{i});
+            return start;
         }
     }
+
     return null;
 }
 
-inline fn bitand_array(a: []u8, b: []const u8) void {
-    std.debug.assert(a.len == b.len);
-    for (0..a.len) |i| {
-        a[i] &= b[i];
-    }
+test "Pattern scan 1" {
+    const expect = std.testing.expect;
+
+    const memory = [_]u8{ 0x01, 0x02, 0x03, 0x04, 0x05 };
+    const pattern = [_]u8{ 0x02, 0x00, 0x04 };
+    const wildcards = [_]u8{ 0xff, 0x00, 0xff };
+    const index = (try findPattern(32, &memory, &pattern, &wildcards)) orelse 0;
+    try expect(index == 1);
 }
 
 pub fn main(init: std.process.Init) !void {
-    _ = init;
+    var regions = try getRegionsInfo(init.io, init.gpa);
+    defer regions.deinit(init.gpa);
 
-    var memory = [_]u8{ 0x01, 0x02, 0x03, 0x04, 0x05 };
-    var pattern = [_]u8{ 0x01, 0x02, 0x03, 0x00, 0x05 };
-    const wildcards = [_]u8{ 0xff, 0xff, 0xff, 0x00, 0xff };
-    bitand_array(&pattern, &wildcards);
-    bitand_array(&memory, &wildcards);
-    std.log.debug("{any}", .{memory});
-    std.log.debug("{any}", .{pattern});
-    std.log.debug("{any}", .{pattern});
+    for (regions.items) |region| {
+        std.log.info("{x}-{x} {x}", .{
+            region.start,
+            region.end,
+            region.end - region.start,
+        });
 
-    //    var regions = try getRegionsInfo(init.io, init.gpa);
+        const start_ptr: [*]const u8 = @ptrFromInt(region.start);
+        const region_slice = start_ptr[0 .. region.end - region.start];
 
-    //    for (regions.items) |region| {
-    //        std.log.info("{x}-{x} {x}", .{
-    //            region.start,
-    //            region.end,
-    //            region.end - region.start,
-    //        });
-    //        if (tryReadRegion(region)) |i| {
-    //            const ptr_short = @as([*c]u16, i);
-    //            std.log.info("value: {x}", .{ptr_short.*});
-    //        }
-    //    }
-
-    //    defer regions.deinit(init.gpa);
+        const pattern = [_]u8{ 0x69, 0x00, 0x42 };
+        const wildcards = [_]u8{ 0xff, 0x00, 0xff };
+        if (try findPattern(32, region_slice, &pattern, &wildcards)) |index| {
+            std.log.info("FOUND PATTERN {any} {any}", .{
+                index,
+                region_slice[index],
+            });
+        }
+    }
 }
